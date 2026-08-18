@@ -1,0 +1,2 @@
+/* Overlay styles live in src/content/overlay.js so they can be injected
+   into a closed Shadow DOM. This file is not loaded by the manifest. */

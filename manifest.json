@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "LinkedIn AI Blocker",
+  "version": "1.1.0",
+  "description": "Joke-grade LinkedIn feed scanner that covers posts matching too many AI-writing heuristics.",
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/*", "https://linkedin.com/*"],
+      "js": [
+        "src/config/settings.js",
+        "src/utils/text.js",
+        "src/detectors/lackOfBurstiness.js",
+        "src/detectors/ruleOfThree.js",
+        "src/detectors/overExplaining.js",
+        "src/detectors/flawlessYetEmpty.js",
+        "src/detectors/index.js",
+        "src/content/postScanner.js",
+        "src/content/overlay.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
