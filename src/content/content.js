@@ -1,61 +1,100 @@
 (function () {
-  const { SETTINGS, scanner, runDetectors, coverPost, text } = AIBlocker;
+  const { SETTINGS, scanner, runDetectors, coverPost, showScoreBadge, text } = AIBlocker;
 
   let lastPostCount = -1;
+  let scanning = false;
 
-  function scanFeed() {
-    AIBlocker.ensureOverlayHost();
-    const posts = scanner.findPosts();
+  function emptyVerdict() {
+    return {
+      flagged: false,
+      ai_score: 0,
+      confidence: "Low",
+      signals_detected: [],
+      reasoning: "Post too short to score.",
+      parametersHit: 0,
+      parameterCount: 6,
+      shouldCover: false,
+    };
+  }
 
-    if (SETTINGS.debug && posts.length !== lastPostCount) {
-      lastPostCount = posts.length;
-      console.info("[AI Blocker] scan", {
-        posts: posts.length,
-        coverAllPosts: SETTINGS.coverAllPosts,
-      });
+  function logVerdict(author, verdict) {
+    console.info("[AI Blocker]", {
+      author,
+      flagged: verdict.flagged,
+      ai_score: verdict.ai_score,
+      confidence: verdict.confidence,
+      signals_detected: verdict.signals_detected,
+      reasoning: verdict.reasoning,
+    });
+  }
+
+  async function scanFeed() {
+    if (scanning) {
+      return;
     }
+    scanning = true;
 
-    for (const post of posts) {
-      if (scanner.isDismissed(post) || AIBlocker.hasOverlay(post)) {
-        continue;
+    try {
+      AIBlocker.ensureOverlayHost();
+      const posts = scanner.findPosts();
+
+      if (SETTINGS.debug && posts.length !== lastPostCount) {
+        lastPostCount = posts.length;
+        console.info("[AI Blocker] scan", {
+          posts: posts.length,
+          coverAllPosts: SETTINGS.coverAllPosts,
+        });
       }
 
-      if (SETTINGS.coverAllPosts) {
-        coverPost(post);
-        continue;
+      for (const post of posts) {
+        if (scanner.isDismissed(post) || AIBlocker.hasOverlay(post)) {
+          continue;
+        }
+
+        if (!scanner.isInViewport(post)) {
+          continue;
+        }
+
+        if (scanner.isScanned(post)) {
+          continue;
+        }
+
+        scanner.markScanned(post);
+
+        const value = await scanner.readFullDescription(post);
+        const author = scanner.extractAuthorName(post);
+
+        if (text.normalize(value).length < SETTINGS.minTextLength) {
+          const verdict = emptyVerdict();
+          showScoreBadge(post, verdict);
+          logVerdict(author, verdict);
+          if (SETTINGS.coverAllPosts) {
+            coverPost(post, verdict);
+          }
+          continue;
+        }
+
+        const verdict = runDetectors(value);
+        showScoreBadge(post, verdict);
+        logVerdict(author, verdict);
+
+        if (SETTINGS.debug) {
+          console.debug("[AI Blocker] details", {
+            id: scanner.getPostId(post) ?? "(no id)",
+            cover: verdict.shouldCover,
+            results: verdict.results,
+          });
+        }
+
+        if (SETTINGS.coverAllPosts || verdict.flagged) {
+          coverPost(post, verdict);
+        }
       }
 
-      if (scanner.isScanned(post)) {
-        continue;
-      }
-
-      scanner.markScanned(post);
-
-      const value = text.normalize(scanner.extractPostText(post));
-      if (value.length < SETTINGS.minTextLength) {
-        continue;
-      }
-
-      const verdict = runDetectors(value);
-
-      if (SETTINGS.debug) {
-        const failed = verdict.results
-          .filter((result) => result.failed)
-          .map((result) => `${result.name}: ${result.reason}`);
-        console.info(
-          "[AI Blocker]",
-          scanner.getPostId(post) ?? "(no id)",
-          `${verdict.failedCount} failed`,
-          failed,
-        );
-      }
-
-      if (verdict.shouldCover) {
-        coverPost(post);
-      }
+      AIBlocker.syncOverlays();
+    } finally {
+      scanning = false;
     }
-
-    AIBlocker.syncOverlays();
   }
 
   function debounce(fn, waitMs) {

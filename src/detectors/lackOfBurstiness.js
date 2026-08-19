@@ -2,26 +2,30 @@ var AIBlocker = AIBlocker || {};
 AIBlocker.detectors = AIBlocker.detectors || {};
 
 AIBlocker.detectors.lackOfBurstiness = function detectLackOfBurstiness(value) {
-  const { minSentences, maxCoefficientOfVariation } = AIBlocker.SETTINGS.burstiness;
-  const sentences = AIBlocker.text.splitSentences(value);
+  const { minSentences, minWords, maxWords, maxNarrowShare, points } = AIBlocker.SETTINGS.burstiness;
   const counts = AIBlocker.text.sentenceWordCounts(value);
 
-  if (sentences.length < minSentences) {
+  if (counts.length < minSentences) {
     return {
       name: "lackOfBurstiness",
       failed: false,
-      reason: `Only ${sentences.length} sentence(s); need ${minSentences} to judge cadence.`,
+      points: 0,
+      signals: [],
+      reason: `Only ${counts.length} sentence(s); need ${minSentences} to judge cadence.`,
     };
   }
 
-  const cv = AIBlocker.text.coefficientOfVariation(counts);
-  const failed = cv < maxCoefficientOfVariation;
+  const narrow = counts.filter((count) => count >= minWords && count <= maxWords).length;
+  const share = narrow / counts.length;
+  const failed = share >= maxNarrowShare;
 
   return {
     name: "lackOfBurstiness",
     failed,
+    points: failed ? points : 0,
+    signals: failed ? [`${Math.round(share * 100)}% of sentences are ${minWords}–${maxWords} words`] : [],
     reason: failed
-      ? `Sentence-length CV ${cv.toFixed(2)} is below ${maxCoefficientOfVariation} (even cadence).`
-      : `Sentence-length CV ${cv.toFixed(2)} looks varied enough.`,
+      ? `${Math.round(share * 100)}% of sentences fall in a ${minWords}–${maxWords} word window.`
+      : `${Math.round(share * 100)}% of sentences are ${minWords}–${maxWords} words (need ${Math.round(maxNarrowShare * 100)}%+).`,
   };
 };

@@ -15,9 +15,10 @@ var AIBlocker = AIBlocker || {};
     'div[data-urn^="urn:li:share"]',
     'div[data-urn^="urn:li:ugcPost"]',
     'div[data-urn^="urn:li:aggregatedShare"]',
-    'main [role="article"]',
-    'main [role="listitem"]',
   ];
+
+  const CHROME_SELECTOR =
+    "header, #global-nav, .global-nav, [role='banner'], .search-global-typeahead, aside, .scaffold-layout__sidebar, .msg-overlay-list-bubble";
 
   const TEXT_SELECTORS = [
     '[data-testid="expandable-text-box"]',
@@ -27,6 +28,25 @@ var AIBlocker = AIBlocker || {};
     ".feed-shared-update-v2__description",
     ".update-components-text",
     ".feed-shared-inline-show-more-text",
+  ];
+
+  const AUTHOR_SELECTORS = [
+    ".update-components-actor__title span[aria-hidden='true']",
+    ".update-components-actor__name span[aria-hidden='true']",
+    "[data-view-name='feed-actor-name']",
+    ".update-components-actor__title",
+    ".update-components-actor__name",
+    ".feed-shared-actor__name",
+    "a[data-view-name='feed-actor-image'] ~ div span[aria-hidden='true']",
+  ];
+
+  const MORE_SELECTORS = [
+    '.feed-shared-inline-show-more-text button[aria-expanded="false"]',
+    'button.feed-shared-inline-show-more-text__see-more-less-toggle[aria-expanded="false"]',
+    'button[aria-label*="see more" i]',
+    'button[aria-label*="show more" i]',
+    ".inline-show-more-text__link",
+    '[data-testid="expandable-text-box"] button[aria-expanded="false"]',
   ];
 
   const MIN_HEIGHT = 80;
@@ -49,7 +69,12 @@ var AIBlocker = AIBlocker || {};
       }
 
       for (const element of nodes) {
-        if (seen.has(element) || isNestedPost(element, seen) || !isVisibleCard(element)) {
+        if (
+          seen.has(element) ||
+          isPageChrome(element) ||
+          isNestedPost(element, seen) ||
+          !isVisibleCard(element)
+        ) {
           continue;
         }
         seen.add(element);
@@ -60,9 +85,36 @@ var AIBlocker = AIBlocker || {};
     return posts;
   };
 
+  function isPageChrome(element) {
+    return Boolean(element.closest(CHROME_SELECTOR));
+  }
+
   function isVisibleCard(element) {
     const rect = element.getBoundingClientRect();
     return rect.height >= MIN_HEIGHT && rect.width >= MIN_WIDTH;
+  }
+
+  scanner.isInViewport = function isInViewport(element) {
+    const rect = element.getBoundingClientRect();
+    const viewHeight = window.innerHeight || document.documentElement.clientHeight;
+    const viewWidth = window.innerWidth || document.documentElement.clientWidth;
+    const visibleHeight = Math.min(rect.bottom, viewHeight) - Math.max(rect.top, 0);
+    const visibleWidth = Math.min(rect.right, viewWidth) - Math.max(rect.left, 0);
+    return visibleHeight >= 40 && visibleWidth >= 40;
+  };
+
+  function clickWithoutScrolling(element) {
+    const x = window.scrollX;
+    const y = window.scrollY;
+    try {
+      element.focus({ preventScroll: true });
+    } catch (_error) {
+      // ignore
+    }
+    element.click();
+    if (window.scrollX !== x || window.scrollY !== y) {
+      window.scrollTo(x, y);
+    }
   }
 
   function isNestedPost(element, seen) {
@@ -74,15 +126,84 @@ var AIBlocker = AIBlocker || {};
     return false;
   }
 
-  scanner.extractPostText = function extractPostText(postEl) {
+  function findCommentary(postEl) {
     for (const selector of TEXT_SELECTORS) {
       const node = postEl.querySelector(selector);
-      const value = node?.innerText?.trim();
-      if (value) {
-        return value;
+      if (node) {
+        return node;
       }
     }
-    return (postEl.innerText || "").trim();
+    return null;
+  }
+
+  function cleanDescription(raw) {
+    return String(raw || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+/g, " ").trim())
+      .join("\n")
+      .replace(/(?:…|\.{2,})\s*more\s*$/i, "")
+      .replace(/\bsee more\s*$/i, "")
+      .replace(/\bshow more\s*$/i, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  scanner.extractPostText = function extractPostText(postEl) {
+    const node = findCommentary(postEl);
+    if (!node) {
+      return "";
+    }
+    return cleanDescription(node.innerText || node.textContent || "");
+  };
+
+  scanner.extractAuthorName = function extractAuthorName(postEl) {
+    for (const selector of AUTHOR_SELECTORS) {
+      const node = postEl.querySelector(selector);
+      const name = (node?.textContent || "").replace(/\s+/g, " ").trim().split("\n")[0];
+      if (name) {
+        return name.trim();
+      }
+    }
+    return "Unknown";
+  };
+
+  scanner.expandSeeMore = function expandSeeMore(postEl) {
+    const scope = findCommentary(postEl) || postEl;
+
+    for (const selector of MORE_SELECTORS) {
+      const button = scope.querySelector(selector);
+      if (!button) {
+        continue;
+      }
+      const label = `${button.getAttribute("aria-label") || ""} ${button.textContent || ""}`;
+      if (/comment/i.test(label)) {
+        continue;
+      }
+      clickWithoutScrolling(button);
+      return true;
+    }
+
+    for (const element of scope.querySelectorAll("button, span[role='button'], a")) {
+      const label = (element.textContent || "").replace(/\s+/g, " ").trim();
+      if (/^(?:…|\.{2,})?\s*more$/i.test(label)) {
+        clickWithoutScrolling(element);
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  scanner.readFullDescription = function readFullDescription(postEl) {
+    if (!scanner.expandSeeMore(postEl)) {
+      return Promise.resolve(scanner.extractPostText(postEl));
+    }
+
+    return new Promise((resolve) => {
+      setTimeout(() => resolve(scanner.extractPostText(postEl)), 150);
+    });
   };
 
   scanner.getPostId = function getPostId(postEl) {
