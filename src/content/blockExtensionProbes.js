@@ -36,9 +36,10 @@
       return currentFetch;
     },
     set(nextFetch) {
-      currentFetch = wrapFetch(nextFetch);
+      currentFetch = wrapFetch(typeof nextFetch === "function" ? nextFetch : realFetch);
     },
-    configurable: false,
+    configurable: true,
+    enumerable: true,
   });
 
   const realOpen = XMLHttpRequest.prototype.open;

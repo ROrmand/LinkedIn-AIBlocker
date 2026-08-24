@@ -1,15 +1,16 @@
 # LinkedIn-AIBlocker
 
-A local Chrome extension that scores LinkedIn feed posts with weighted linguistic heuristics (0–100). Each scanned post gets a top-right badge with the AI score and how many parameters hit. If the score is **at least 25** and **at least 1 parameter** fires, the post is covered with a dark card overlay:
+A local Chrome extension that scores LinkedIn feed posts with weighted linguistic heuristics (0–100). A session summary in the page’s top-right tracks how many posts have been scanned, how many were flagged as AI, and that share of the feed; it can be minimized. Each scanned post also gets a per-post badge with the AI score and how many parameters hit. If the score is **at least 25** and **at least 1 parameter** fires, the post is covered with a translucent black sheet and a compact card that uses that post’s type:
 
-> **AI Blocker**
-> **AI detected**
+> **AI SLOP DETECTED 🗣️**
 >
-> Detector reasoning for why the post looks AI-written, plus a few matching signals, the score, and how many parameters hit.
+> Click **score** to see how the 0–100 total is summed (and which checks added points). Click **parameters** to see which of the six checks failed, then open a row for what that flag means on this post.
 >
-> Click to reveal this post
+> **Show anyway** reveals the post. Opening score or parameters expands the card and hides that button; closing the panel returns the card to its original size.
 
 This is a joke extension, not an accurate AI detector. Heuristics are tunable and easy to add.
+
+On desktop, opening **Start a post** hides the session summary and shows a **Draft check** card to the right of the composer. It live-scores the draft with the same detectors and lists which parameters pass or fail while you type. Closing the composer restores the session summary.
 
 `coverAllPosts` is currently `false` in [`src/config/settings.js`](src/config/settings.js), so posts are covered only when the score rule fires. Set it to `true` to cover every feed post again.
 
@@ -30,8 +31,8 @@ If the LinkedIn layout looks like the mobile site (icons along the bottom), that
 ## How it works
 
 1. A content script watches the feed with a `MutationObserver` and only expands/scores posts in the viewport.
-2. Overlays and score badges are drawn in a closed Shadow DOM host on `document.documentElement`, so LinkedIn CSS cannot restyle them and our CSS cannot restyle LinkedIn.
-3. LinkedIn nodes are not modified (no classes or data attributes). Click-to-dismiss is remembered by post id; the score badge stays.
+2. Overlays and score badges sit in a closed Shadow DOM host **on the post itself** (`position: absolute; inset: 0`), so they scroll with the feed instead of being JS-repositioned every frame. LinkedIn CSS cannot restyle them and our CSS cannot restyle LinkedIn.
+3. A host node is appended to each scored post (and `position: relative` is set only if the card was `static`). Click-to-dismiss is remembered by post id; the score badge stays. If LinkedIn strips the host, it is remounted.
 4. If `coverAllPosts` is false, post text is scored by detectors in `src/detectors/` and covered when `ai_score >= 25` and `parametersHit >= 1`.
 
 ## Scoring
@@ -73,7 +74,7 @@ To add a new check:
 manifest.json
 src/config/settings.js
 src/detectors/          # one file per heuristic + registry
-src/content/            # scanner, overlay, classic content scripts
+src/content/            # scanner, overlay, composer coach, classic content scripts
 src/utils/text.js
 styles/overlay.css
 icons/icon128.png

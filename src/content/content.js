@@ -10,6 +10,7 @@
       ai_score: 0,
       confidence: "Low",
       signals_detected: [],
+      results: [],
       reasoning: "Post too short to score.",
       parametersHit: 0,
       parameterCount: 6,
@@ -67,6 +68,7 @@
         if (text.normalize(value).length < SETTINGS.minTextLength) {
           const verdict = emptyVerdict();
           showScoreBadge(post, verdict);
+          AIBlocker.recordScan(post, verdict.flagged);
           logVerdict(author, verdict);
           if (SETTINGS.coverAllPosts) {
             coverPost(post, verdict);
@@ -76,6 +78,7 @@
 
         const verdict = runDetectors(value);
         showScoreBadge(post, verdict);
+        AIBlocker.recordScan(post, verdict.flagged);
         logVerdict(author, verdict);
 
         if (SETTINGS.debug) {
@@ -116,16 +119,22 @@
 
     console.info("[AI Blocker] loaded");
     AIBlocker.ensureOverlayHost();
+    AIBlocker.startComposerCoach();
 
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of mutation.removedNodes) {
-          if (node && node.getAttribute && node.getAttribute("data-ai-blocker") === "host") {
+          const kind = node && node.getAttribute && node.getAttribute("data-ai-blocker");
+          if (kind === "host" || kind === "stats") {
             AIBlocker.ensureOverlayHost();
+          }
+          if (kind === "coach" && typeof AIBlocker.syncComposerCoach === "function") {
+            AIBlocker.syncComposerCoach();
           }
         }
       }
       scheduleScan();
+      scheduleCoach();
     });
     observer.observe(root, { childList: true, subtree: true });
 
@@ -133,6 +142,12 @@
     setInterval(scanFeed, 1500);
     scanFeed();
   }
+
+  const scheduleCoach = debounce(() => {
+    if (typeof AIBlocker.syncComposerCoach === "function") {
+      AIBlocker.syncComposerCoach();
+    }
+  }, SETTINGS.scanDebounceMs || 300);
 
   start();
 })();

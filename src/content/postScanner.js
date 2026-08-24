@@ -158,6 +158,31 @@ var AIBlocker = AIBlocker || {};
     return cleanDescription(node.innerText || node.textContent || "");
   };
 
+  const TYPE_FALLBACK = 'Georgia, "Times New Roman", ui-serif, serif';
+
+  scanner.extractPostTypography = function extractPostTypography(postEl) {
+    const node = findCommentary(postEl) || postEl;
+    let style;
+    try {
+      style = window.getComputedStyle(node);
+    } catch (_error) {
+      return {
+        fontFamily: TYPE_FALLBACK,
+        fontSize: "16px",
+        fontWeight: "400",
+        lineHeight: "1.4",
+      };
+    }
+
+    const family = (style.fontFamily || "").trim();
+    return {
+      fontFamily: family || TYPE_FALLBACK,
+      fontSize: style.fontSize || "16px",
+      fontWeight: style.fontWeight || "400",
+      lineHeight: style.lineHeight && style.lineHeight !== "normal" ? style.lineHeight : "1.4",
+    };
+  };
+
   scanner.extractAuthorName = function extractAuthorName(postEl) {
     for (const selector of AUTHOR_SELECTORS) {
       const node = postEl.querySelector(selector);
