@@ -5,58 +5,78 @@ var AIBlocker = AIBlocker || {};
   const COACH_WIDTH = 280;
   const GAP = 12;
   const DEBOUNCE_MS = 200;
-  const BURST_MS = [0, 50, 120, 250, 500, 900, 1500, 2500];
+  const CLOSE_MISS_LIMIT = 3;
+  const MIN_TOOLBAR_HITS = 3;
 
-  // Prefer stable attrs; class names drift with LinkedIn CSS-in-JS hashes.
-  const COMPOSER_ROOT_SELECTORS = [
-    ".share-box-v2__modal",
-    '[data-test-modal][role="dialog"]',
-    ".share-creation-state",
-    ".share-box-modal",
-    ".share-box-feed-entry__container",
-    ".share-box",
-    ".artdeco-modal.share-box-v2__modal",
-    '[role="dialog"]',
-    '[aria-modal="true"]',
-    "[data-test-modal]",
-    "[data-test-modal-id]",
+  // Create-a-post footer icons (emoji, photo, event, celebrate, more).
+  // Prefer aria-labels / sprite ids; Ember button ids change every session.
+  const TOOLBAR_SIGNALS = [
+    {
+      name: "emoji",
+      selectors: [
+        'button[aria-label="Open Emoji Keyboard"]',
+        "button.share_creation_state__emoji-picker-trigger",
+        'use[href="#emoji-medium"]',
+        'use[*|href="#emoji-medium"]',
+        'use[href*="emoji-medium"]',
+      ],
+    },
+    {
+      name: "image",
+      selectors: [
+        'use[href="#image-medium"]',
+        'use[*|href="#image-medium"]',
+        'use[href*="image-medium"]',
+        'button[aria-label*="Add a photo"]',
+        'button[aria-label*="photo"]',
+        'button[aria-label*="Image"]',
+      ],
+    },
+    {
+      name: "event",
+      selectors: [
+        'use[href="#calendar-medium"]',
+        'use[*|href="#calendar-medium"]',
+        'use[href*="calendar-medium"]',
+        'button[aria-label*="Create an event"]',
+        'button[aria-label*="event"]',
+      ],
+    },
+    {
+      name: "celebrate",
+      selectors: [
+        'use[href="#celebrate-medium"]',
+        'use[*|href="#celebrate-medium"]',
+        'use[href*="celebrate-medium"]',
+        'button[aria-label*="Celebrate"]',
+        'button[aria-label*="occasion"]',
+      ],
+    },
+    {
+      name: "more",
+      selectors: [
+        'use[href="#plus-medium"]',
+        'use[*|href="#plus-medium"]',
+        'use[href*="plus-medium"]',
+        'button[aria-label="Open the more options menu for sharing content"]',
+        'button[aria-label*="Add more"]',
+      ],
+    },
   ];
-  const COMPOSER_SELECTORS = COMPOSER_ROOT_SELECTORS;
+
   const EDITOR_SELECTORS = [
     '.ql-editor[contenteditable="true"]',
     '[data-test-ql-editor-contenteditable="true"]',
     '[role="textbox"][contenteditable="true"]',
     '.share-creation-state__text-editor [contenteditable="true"]',
     'div[data-placeholder*="What do you want to talk about"]',
-    'div[data-placeholder*="talk about"]',
     'div[aria-placeholder*="What do you want to talk about"]',
-    'div[aria-placeholder*="talk about"]',
   ];
-  const TRIGGER_SELECTORS = [
-    ".share-box-feed-entry__trigger",
-    '[data-test-id="share-box-feed-entry__trigger"]',
-    '[data-test-id="share-box-feed-entrytrigger"]',
-    '[data-test-share-box-trigger]',
-    ".share-box-feed-entry__top-bar",
-    ".share-box-feed-entry__closed-share-box",
-    'button[aria-label="Start a post"]',
-    'button[aria-label*="Start a post"]',
-  ];
+
   const COMMENT_ANCESTOR =
     ".comments-comment-box, .comments-comment-texteditor, [data-view-name='feed-comment']";
   const FEED_POST_ANCESTOR =
     '.feed-shared-update-v2, [data-view-name="feed-full-update"], [data-view-name="feed-mini-update"], [data-view-name="feed-commentary"]';
-  const COMPOSER_MARKERS = [
-    ".share-actions__primary-action",
-    ".share-creation-state__text-editor",
-    ".share-creation-state__footer",
-    ".share-box_actions",
-    'button.share-actions__primary-action',
-    "#share-to-linkedin-modal__header",
-  ];
-  const PENDING_MS = 8000;
-  const LOST_GRACE_MS = 2500;
-  const CLOSE_MISS_LIMIT = 3;
 
   const CSS = `
     :host {
@@ -66,11 +86,14 @@ var AIBlocker = AIBlocker || {};
       pointer-events: auto !important;
       display: block !important;
       width: ${COACH_WIDTH}px !important;
+      box-sizing: border-box !important;
     }
     .ai-blocker-coach {
       box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
       width: 100%;
-      max-height: calc(100vh - 16px);
+      height: 100%;
       margin: 0;
       padding: 16px 16px 14px;
       overflow: auto;
@@ -105,6 +128,7 @@ var AIBlocker = AIBlocker || {};
       grid-template-columns: 1fr 1fr;
       gap: 8px;
       margin: 10px 0 0;
+      flex-shrink: 0;
     }
     .ai-blocker-overlay__toggle {
       box-sizing: border-box;
@@ -145,6 +169,8 @@ var AIBlocker = AIBlocker || {};
     }
     .ai-blocker-coach__flags {
       margin: 10px 0 0;
+      flex: 1 1 auto;
+      min-height: 0;
     }
     .ai-blocker-overlay__flags {
       display: flex;
@@ -243,15 +269,10 @@ var AIBlocker = AIBlocker || {};
   let composerEl = null;
   let editorObserver = null;
   let debounceTimer = 0;
-  let burstTimers = [];
-  let lastText = null;
   let started = false;
-  let composerPendingUntil = 0;
-  let lastSeenComposerAt = 0;
   let composerActive = false;
   let closeMisses = 0;
-  // Live node refs from click/focus events (works even when querySelector misses).
-  let forcedMatch = null;
+  let lastText = null;
 
   function emptyVerdict() {
     const total = AIBlocker.overlayUi?.DETECTOR_ORDER?.length || 6;
@@ -273,12 +294,11 @@ var AIBlocker = AIBlocker || {};
       return false;
     }
     const rect = element.getBoundingClientRect();
-    const viewHeight = window.innerHeight || document.documentElement.clientHeight;
-    const viewWidth = window.innerWidth || document.documentElement.clientWidth;
-    // Share modal can report a small editor rect while chrome is still laying out.
     if (rect.width < 8 || rect.height < 8) {
       return false;
     }
+    const viewHeight = window.innerHeight || document.documentElement.clientHeight;
+    const viewWidth = window.innerWidth || document.documentElement.clientWidth;
     const visibleHeight = Math.min(rect.bottom, viewHeight) - Math.max(rect.top, 0);
     const visibleWidth = Math.min(rect.right, viewWidth) - Math.max(rect.left, 0);
     return visibleHeight >= 8 && visibleWidth >= 8;
@@ -292,310 +312,120 @@ var AIBlocker = AIBlocker || {};
     return Boolean(element?.closest(FEED_POST_ANCESTOR));
   }
 
-  function looksLikeComposer(root) {
-    if (!root) {
-      return false;
-    }
-    for (const selector of COMPOSER_MARKERS) {
+  function queryFirst(root, selectors) {
+    for (const selector of selectors) {
       try {
-        if (root.matches?.(selector) || root.querySelector?.(selector)) {
-          return true;
+        const node = root.querySelector(selector);
+        if (node) {
+          return node;
         }
       } catch (_error) {
-        // ignore invalid selector scope
+        // ignore invalid selectors
       }
     }
-    return false;
+    return null;
   }
 
-  function placeholderLooksLikeShare(editor) {
-    const attrs = [
-      editor?.getAttribute?.("data-placeholder"),
-      editor?.getAttribute?.("aria-placeholder"),
-      editor?.getAttribute?.("aria-label"),
-    ];
-    const blob = attrs.filter(Boolean).join(" ").toLowerCase();
+  function countToolbarHits(root) {
+    if (!root?.querySelector) {
+      return { hits: 0, nodes: [] };
+    }
+    const nodes = [];
+    let hits = 0;
+    for (const signal of TOOLBAR_SIGNALS) {
+      const node = queryFirst(root, signal.selectors);
+      if (node) {
+        hits += 1;
+        nodes.push(node);
+      }
+    }
+    return { hits, nodes };
+  }
+
+  function findComposerAnchor(fromNode) {
+    if (!fromNode?.closest) {
+      return null;
+    }
     return (
-      blob.includes("talk about") ||
-      blob.includes("start a post") ||
-      blob.includes("share an update") ||
-      blob.includes("what do you want") ||
-      blob.includes("text editor for creating content")
+      fromNode.closest(
+        [
+          ".share-box-v2__modal",
+          '[aria-labelledby="share-to-linkedin-modal__header"]',
+          '[data-test-modal][role="dialog"]',
+          ".share-creation-state",
+          '[role="dialog"]',
+          "[aria-modal='true']",
+        ].join(", "),
+      ) || null
     );
   }
 
-  function findShareRoot(element) {
-    if (!element) {
+  function findEditorIn(root) {
+    if (!root?.querySelectorAll) {
       return null;
     }
-    for (const selector of COMPOSER_ROOT_SELECTORS) {
+    for (const selector of EDITOR_SELECTORS) {
+      let nodes;
       try {
-        const root = element.closest(selector);
-        if (root) {
-          return root;
-        }
+        nodes = root.querySelectorAll(selector);
       } catch (_error) {
-        // ignore invalid selector
+        continue;
       }
-    }
-    let node = element.parentElement;
-    while (node && node !== document.body && node !== document.documentElement) {
-      if (
-        node.getAttribute?.("role") === "dialog" ||
-        node.hasAttribute?.("data-test-modal") ||
-        node.classList?.contains("share-box-v2__modal") ||
-        node.getAttribute?.("aria-modal") === "true" ||
-        looksLikeComposer(node)
-      ) {
+      for (const node of nodes) {
+        if (node.classList?.contains("ql-clipboard")) {
+          continue;
+        }
+        if (isCommentEditor(node) || isFeedPostEditor(node)) {
+          continue;
+        }
         return node;
       }
-      node = node.parentElement;
     }
     return null;
   }
 
-  function markComposerPending() {
-    // Opening only — do not mark composerActive until the modal is actually in the DOM.
-    // Burst sync would otherwise count "misses" and restore the HUD before LinkedIn mounts it.
-    composerPendingUntil = Date.now() + PENDING_MS;
-    closeMisses = 0;
-    hideStatsHud();
-  }
-
-  function rememberForcedMatch(composer, editor) {
-    if (!composer && !editor) {
-      return;
-    }
-    forcedMatch = {
-      composer: composer || editor,
-      editor: editor || null,
-    };
-    composerActive = true;
-    lastSeenComposerAt = Date.now();
-    composerPendingUntil = Math.max(composerPendingUntil, Date.now() + PENDING_MS);
-    hideStatsHud();
-  }
-
-  function clearForcedMatch() {
-    forcedMatch = null;
-  }
-
-  function matchFromComposedPath(event) {
-    const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
-    let editor = null;
-    let composer = null;
-    for (const el of path) {
-      if (!el || el.nodeType !== 1) {
-        continue;
-      }
-      try {
-        if (
-          !editor &&
-          (el.matches?.(
-            '.ql-editor[contenteditable="true"], [role="textbox"][contenteditable="true"], [data-test-ql-editor-contenteditable="true"]',
-          ) ||
-            placeholderLooksLikeShare(el))
-        ) {
-          if (!el.classList?.contains("ql-clipboard") && !isCommentEditor(el) && !isFeedPostEditor(el)) {
-            editor = el;
-          }
+  /** Draft mode = create-post toolbar (the 5 footer icons) is in the DOM. */
+  function findDraftComposer() {
+    const seeds = [];
+    for (const signal of TOOLBAR_SIGNALS) {
+      for (const selector of signal.selectors) {
+        try {
+          seeds.push(...document.querySelectorAll(selector));
+        } catch (_error) {
+          // ignore
         }
-        if (
-          !composer &&
-          (el.getAttribute?.("role") === "dialog" ||
-            el.classList?.contains("share-box-v2__modal") ||
-            el.classList?.contains("share-creation-state") ||
-            el.hasAttribute?.("data-test-modal") ||
-            el.getAttribute?.("aria-labelledby") === "share-to-linkedin-modal__header" ||
-            el.id === "share-to-linkedin-modal__header")
-        ) {
-          composer = el.id === "share-to-linkedin-modal__header" ? el.closest?.('[role="dialog"]') || el : el;
-        }
-      } catch (_error) {
-        // ignore
       }
     }
-    if (!composer && editor) {
-      composer = findShareRoot(editor) || editor;
-    }
-    if (composer || editor) {
-      return { composer: composer || editor, editor };
-    }
-    return null;
-  }
 
-  function findComposerFromViewport() {
-    const points = [
-      [0.5, 0.35],
-      [0.5, 0.45],
-      [0.5, 0.55],
-      [0.4, 0.4],
-      [0.6, 0.4],
-    ];
     const seen = new Set();
-    for (const [px, py] of points) {
-      let stack;
-      try {
-        stack = document.elementsFromPoint(
-          Math.round(window.innerWidth * px),
-          Math.round(window.innerHeight * py),
-        );
-      } catch (_error) {
+    for (const seed of seeds) {
+      const button = seed.closest?.("button, [role='button']") || seed;
+      const scope =
+        findComposerAnchor(button) ||
+        button.closest?.(".share-creation-state, form, section") ||
+        button.parentElement;
+      if (!scope || seen.has(scope)) {
         continue;
       }
-      for (const el of stack) {
-        if (!el || seen.has(el)) {
-          continue;
-        }
-        seen.add(el);
-        const dialog =
-          el.closest?.(
-            '.share-box-v2__modal, [data-test-modal][role="dialog"], [aria-labelledby="share-to-linkedin-modal__header"], [role="dialog"]',
-          ) || null;
-        if (!dialog) {
-          continue;
-        }
-        const editor = findEditorIn(dialog);
-        if (
-          dialog.classList?.contains("share-box-v2__modal") ||
-          dialog.hasAttribute?.("data-test-modal") ||
-          dialog.querySelector?.(".share-creation-state, .share-actions__primary-action") ||
-          (editor && placeholderLooksLikeShare(editor)) ||
-          (dialog.textContent || "").includes("What do you want to talk about")
-        ) {
-          return { composer: dialog, editor };
-        }
-      }
-    }
-    return null;
-  }
+      seen.add(scope);
 
-  function findComposerFromDialogs() {
-    let dialogs;
-    try {
-      dialogs = document.querySelectorAll('[role="dialog"], [data-test-modal], .artdeco-modal');
-    } catch (_error) {
-      return null;
-    }
-    for (const dialog of dialogs) {
-      const text = dialog.textContent || "";
-      const labelled =
-        dialog.getAttribute("aria-labelledby") === "share-to-linkedin-modal__header" ||
-        Boolean(dialog.querySelector("#share-to-linkedin-modal__header"));
-      const shareText =
-        text.includes("What do you want to talk about") ||
-        text.includes("Create post") ||
-        text.includes("Post to Anyone");
-      if (!labelled && !shareText && !dialog.classList?.contains("share-box-v2__modal")) {
+      const { hits } = countToolbarHits(scope);
+      if (hits < MIN_TOOLBAR_HITS) {
         continue;
       }
-      const editor = findEditorIn(dialog);
-      return { composer: dialog, editor };
+      if (!isVisible(scope) && !isVisible(button)) {
+        continue;
+      }
+
+      const composer = findComposerAnchor(scope) || scope;
+      const editor = findEditorIn(composer) || findEditorIn(scope);
+      if (editor && (isCommentEditor(editor) || isFeedPostEditor(editor))) {
+        continue;
+      }
+      return { composer, editor: editor || null, hits };
     }
+
     return null;
-  }
-
-  function getForcedMatch() {
-    if (!forcedMatch) {
-      return null;
-    }
-    const composerOk = forcedMatch.composer?.isConnected && isVisible(forcedMatch.composer);
-    const editorOk = forcedMatch.editor?.isConnected && isVisible(forcedMatch.editor);
-    if (!composerOk && !editorOk) {
-      // Hidden or detached — LinkedIn closed/dismissed the overlay.
-      forcedMatch = null;
-      return null;
-    }
-    if (!forcedMatch.composer?.isConnected && forcedMatch.editor?.isConnected) {
-      forcedMatch.composer = findShareRoot(forcedMatch.editor) || forcedMatch.editor;
-    }
-    if (forcedMatch.composer?.isConnected && !forcedMatch.editor?.isConnected) {
-      forcedMatch.editor = findEditorIn(forcedMatch.composer);
-    }
-    return forcedMatch;
-  }
-
-  function clearComposerPending() {
-    composerPendingUntil = 0;
-  }
-
-  function isComposerPending() {
-    return Date.now() < composerPendingUntil;
-  }
-
-  function isComposerRecentlySeen() {
-    return lastSeenComposerAt > 0 && Date.now() - lastSeenComposerAt < LOST_GRACE_MS;
-  }
-
-  function queryShareModalRoot() {
-    try {
-      return (
-        document.querySelector(".share-box-v2__modal") ||
-        document.querySelector('[aria-labelledby="share-to-linkedin-modal__header"]') ||
-        document.querySelector('[data-test-modal][role="dialog"] .share-creation-state')?.closest("[role='dialog'], [data-test-modal]") ||
-        document.querySelector(".share-creation-state__share-box-v2")?.closest("[role='dialog'], .artdeco-modal") ||
-        null
-      );
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  // True only while the create-post overlay is actually on screen.
-  function isShareModalPresent() {
-    if (getForcedMatch()) {
-      return true;
-    }
-    try {
-      const root = queryShareModalRoot();
-      if (root && isVisible(root)) {
-        return true;
-      }
-      const header = document.getElementById("share-to-linkedin-modal__header");
-      if (header) {
-        const dialog = header.closest('[role="dialog"], .artdeco-modal, .share-box-v2__modal');
-        if (dialog && isVisible(dialog)) {
-          return true;
-        }
-      }
-      const editor = document.querySelector(
-        '.ql-editor[data-placeholder*="What do you want to talk about"], .ql-editor[aria-placeholder*="What do you want to talk about"]',
-      );
-      if (editor && isVisible(editor) && !isCommentEditor(editor) && !isFeedPostEditor(editor)) {
-        return true;
-      }
-    } catch (error) {
-      if (SETTINGS.debug) {
-        console.warn("[AI Blocker] isShareModalPresent error", error);
-      }
-      return false;
-    }
-    return false;
-  }
-
-  function logDetectDebug(reason) {
-    if (!SETTINGS.debug) {
-      return;
-    }
-    let dialogs = 0;
-    let shareModals = 0;
-    let headers = 0;
-    try {
-      dialogs = document.querySelectorAll('[role="dialog"]').length;
-      shareModals = document.querySelectorAll(".share-box-v2__modal").length;
-      headers = document.querySelectorAll("#share-to-linkedin-modal__header").length;
-    } catch (_error) {
-      // ignore
-    }
-    console.debug("[AI Blocker] detect", {
-      reason,
-      dialogs,
-      shareModals,
-      headers,
-      forced: Boolean(getForcedMatch()),
-      activeTag: document.activeElement?.tagName,
-      activeClass: document.activeElement?.className,
-    });
   }
 
   function hideStatsHud() {
@@ -608,171 +438,6 @@ var AIBlocker = AIBlocker || {};
     if (typeof AIBlocker.setStatsHudVisible === "function") {
       AIBlocker.setStatsHudVisible(true);
     }
-  }
-
-  function findEditorIn(root) {
-    for (const selector of EDITOR_SELECTORS) {
-      let nodes;
-      try {
-        nodes = root.querySelectorAll(selector);
-      } catch (_error) {
-        continue;
-      }
-      for (const node of nodes) {
-        if (isCommentEditor(node) || isFeedPostEditor(node)) {
-          continue;
-        }
-        // Skip Quill's hidden clipboard mirror.
-        if (node.classList?.contains("ql-clipboard")) {
-          continue;
-        }
-        return node;
-      }
-    }
-    return null;
-  }
-
-  function findComposerFromModal() {
-    let modals;
-    try {
-      modals = document.querySelectorAll(
-        [
-          ".share-box-v2__modal",
-          '[data-test-modal][role="dialog"]',
-          '[role="dialog"].artdeco-modal',
-          ".share-creation-state",
-        ].join(", "),
-      );
-    } catch (_error) {
-      modals = document.querySelectorAll(".share-creation-state, [role='dialog']");
-    }
-
-    for (const modal of modals) {
-      if (!modal?.isConnected) {
-        continue;
-      }
-      const editor = findEditorIn(modal);
-      const shareLike =
-        looksLikeComposer(modal) ||
-        modal.classList?.contains("share-box-v2__modal") ||
-        modal.hasAttribute?.("data-test-modal") ||
-        Boolean(modal.querySelector?.(".share-creation-state, .share-actions__primary-action")) ||
-        (editor && placeholderLooksLikeShare(editor));
-
-      if (!shareLike) {
-        continue;
-      }
-      // Do not require isVisible for known share modals — LinkedIn animates them in.
-      const knownShare =
-        modal.classList?.contains("share-box-v2__modal") ||
-        modal.hasAttribute?.("data-test-modal") ||
-        modal.getAttribute?.("aria-labelledby") === "share-to-linkedin-modal__header";
-      if (!knownShare && !isVisible(modal) && !(editor && isVisible(editor))) {
-        continue;
-      }
-      if (editor && (isCommentEditor(editor) || isFeedPostEditor(editor))) {
-        continue;
-      }
-      return { composer: modal, editor };
-    }
-    return null;
-  }
-
-  function findComposerViaEditor() {
-    let editors;
-    try {
-      editors = document.querySelectorAll(EDITOR_SELECTORS.join(", "));
-    } catch (_error) {
-      editors = document.querySelectorAll('.ql-editor[contenteditable="true"]');
-    }
-
-    for (const editor of editors) {
-      if (isCommentEditor(editor) || isFeedPostEditor(editor)) {
-        continue;
-      }
-      if (editor.classList?.contains("ql-clipboard")) {
-        continue;
-      }
-      if (!isVisible(editor) && !placeholderLooksLikeShare(editor)) {
-        continue;
-      }
-      const root = findShareRoot(editor);
-      if (!root) {
-        if (placeholderLooksLikeShare(editor)) {
-          return {
-            composer: editor.closest('[role="dialog"], [data-test-modal], .share-box-v2__modal, form, section, div') || editor,
-            editor,
-          };
-        }
-        continue;
-      }
-      const closedShell =
-        root.matches?.(".share-box-feed-entry__closed-share-box, .share-box-feed-entry__trigger") ||
-        (Boolean(root.querySelector?.(".share-box-feed-entry__trigger")) &&
-          !looksLikeComposer(root) &&
-          !placeholderLooksLikeShare(editor) &&
-          !root.classList?.contains("share-box-v2__modal") &&
-          !root.hasAttribute?.("data-test-modal"));
-      if (closedShell) {
-        continue;
-      }
-      return { composer: root, editor };
-    }
-    return null;
-  }
-
-  function findComposer() {
-    const forced = getForcedMatch();
-    if (forced) {
-      return forced;
-    }
-
-    const fromViewport = findComposerFromViewport();
-    if (fromViewport) {
-      return fromViewport;
-    }
-
-    const fromDialogs = findComposerFromDialogs();
-    if (fromDialogs) {
-      return fromDialogs;
-    }
-
-    const fromModal = findComposerFromModal();
-    if (fromModal) {
-      return fromModal;
-    }
-
-    const viaEditor = findComposerViaEditor();
-    if (viaEditor) {
-      return viaEditor;
-    }
-
-    for (const selector of COMPOSER_SELECTORS) {
-      let nodes;
-      try {
-        nodes = document.querySelectorAll(selector);
-      } catch (_error) {
-        continue;
-      }
-      for (const node of nodes) {
-        if (isCommentEditor(node) || !isVisible(node)) {
-          continue;
-        }
-        if (
-          node.querySelector?.(".share-box-feed-entry__trigger") &&
-          !findEditorIn(node) &&
-          !looksLikeComposer(node)
-        ) {
-          continue;
-        }
-        const editor = findEditorIn(node);
-        if (editor || looksLikeComposer(node)) {
-          return { composer: node, editor };
-        }
-      }
-    }
-
-    return null;
   }
 
   function readDraft(editor) {
@@ -792,7 +457,7 @@ var AIBlocker = AIBlocker || {};
     const root = document.createElement("div");
     root.className = "ai-blocker-coach";
     root.setAttribute("role", "region");
-    root.setAttribute("aria-label", "Draft AI-writing score");
+    root.setAttribute("aria-label", "Draft overview");
 
     const kicker = document.createElement("p");
     kicker.className = "ai-blocker-overlay__kicker";
@@ -800,7 +465,7 @@ var AIBlocker = AIBlocker || {};
 
     const title = document.createElement("p");
     title.className = "ai-blocker-overlay__title";
-    title.textContent = "Draft check";
+    title.textContent = "Draft overview";
 
     const toggles = document.createElement("div");
     toggles.className = "ai-blocker-overlay__toggles";
@@ -858,42 +523,8 @@ var AIBlocker = AIBlocker || {};
   function endComposerSession() {
     composerActive = false;
     closeMisses = 0;
-    clearComposerPending();
-    lastSeenComposerAt = 0;
-    clearForcedMatch();
     unmount();
     showStatsHud();
-  }
-
-  function mountCoach(match) {
-    const composer = match?.composer;
-    const editor = match?.editor || null;
-    if (composer) {
-      composerEl = getComposerAnchor(composer) || composer;
-    }
-    const remounted = ensureHost();
-    if (SETTINGS.debug && remounted) {
-      console.info("[AI Blocker] draft coach mounted", {
-        composer: composerEl?.className || composerEl?.tagName || "(none)",
-        hasEditor: Boolean(editor),
-      });
-    }
-    if (editor && !isCommentEditor(editor) && !isFeedPostEditor(editor)) {
-      attachEditor(editor);
-      if (remounted) {
-        lastText = null;
-        scoreNow();
-      }
-    } else {
-      detachEditor();
-      lastText = null;
-      renderVerdict(emptyVerdict(), true);
-    }
-    positionHost();
-    requestAnimationFrame(() => {
-      positionHost();
-      requestAnimationFrame(positionHost);
-    });
   }
 
   function detachEditor() {
@@ -931,25 +562,9 @@ var AIBlocker = AIBlocker || {};
     scoreNow();
   }
 
-  function getComposerAnchor(el) {
-    if (!el?.closest) {
-      return el || null;
-    }
-    return (
-      el.closest(
-        '.share-box-v2__modal, [aria-labelledby="share-to-linkedin-modal__header"], [data-test-modal][role="dialog"], [role="dialog"]',
-      ) || el
-    );
-  }
-
   function getModalRect() {
-    const live = queryShareModalRoot();
-    if (live && isVisible(live)) {
-      return live.getBoundingClientRect();
-    }
-    const anchor = getComposerAnchor(composerEl);
-    if (anchor && isVisible(anchor)) {
-      return anchor.getBoundingClientRect();
+    if (composerEl && isVisible(composerEl)) {
+      return composerEl.getBoundingClientRect();
     }
     return null;
   }
@@ -966,28 +581,27 @@ var AIBlocker = AIBlocker || {};
     if (!rect || rect.width < 40 || rect.height < 40) {
       host.style.left = `${Math.max(margin, vw - COACH_WIDTH - 24)}px`;
       host.style.top = "96px";
+      host.style.height = "";
       return;
     }
 
-    const height = host.offsetHeight || 240;
+    const panelHeight = Math.round(rect.height);
+    host.style.height = `${panelHeight}px`;
+
     const rightLeft = rect.right + GAP;
     const leftLeft = rect.left - GAP - COACH_WIDTH;
-
     let left;
-    // Never cover the post modal: only sit fully to the right or fully to the left.
     if (rightLeft + COACH_WIDTH <= vw - margin) {
       left = rightLeft;
     } else if (leftLeft >= margin) {
       left = leftLeft;
     } else {
-      // Prefer hanging off the right edge of the viewport over overlapping the modal.
       left = rightLeft;
     }
 
-    // Align top edge with the post window.
     let top = rect.top;
-    if (top + height > vh - margin) {
-      top = Math.max(margin, vh - height - margin);
+    if (top + panelHeight > vh - margin) {
+      top = Math.max(margin, vh - panelHeight - margin);
     }
     if (top < margin) {
       top = margin;
@@ -1043,64 +657,52 @@ var AIBlocker = AIBlocker || {};
     debounceTimer = setTimeout(scoreNow, DEBOUNCE_MS);
   }
 
-  function sync() {
-    let match = findComposer();
-    const modalPresent = Boolean(match) || isShareModalPresent();
+  function mountCoach(match) {
+    composerEl = match.composer;
+    const remounted = ensureHost();
+    if (SETTINGS.debug && remounted) {
+      console.info("[AI Blocker] draft overview mounted", {
+        hits: match.hits,
+        hasEditor: Boolean(match.editor),
+      });
+    }
+    if (match.editor && !isCommentEditor(match.editor) && !isFeedPostEditor(match.editor)) {
+      attachEditor(match.editor);
+      if (remounted) {
+        lastText = null;
+        scoreNow();
+      }
+    } else {
+      detachEditor();
+      lastText = null;
+      renderVerdict(emptyVerdict(), true);
+    }
+    positionHost();
+    requestAnimationFrame(() => {
+      positionHost();
+      requestAnimationFrame(positionHost);
+    });
+  }
 
-    if (modalPresent || match) {
+  function sync() {
+    const match = findDraftComposer();
+
+    if (match) {
       composerActive = true;
       closeMisses = 0;
-      lastSeenComposerAt = Date.now();
-      composerPendingUntil = Math.max(composerPendingUntil, Date.now() + PENDING_MS);
       hideStatsHud();
-
-      if (!match) {
-        match =
-          findComposerFromViewport() ||
-          findComposerFromDialogs() ||
-          findComposerFromModal() ||
-          findComposerViaEditor();
-      }
-      if (match) {
-        rememberForcedMatch(match.composer, match.editor);
-        mountCoach(match);
-      } else {
-        ensureHost();
-        if (SETTINGS.debug) {
-          console.info("[AI Blocker] draft coach shell (modal present, editor not bound)");
-          logDetectDebug("shell");
-        }
-        renderVerdict(emptyVerdict(), true);
-        positionHost();
-      }
+      mountCoach(match);
       return;
     }
 
-    if (isComposerPending()) {
-      hideStatsHud();
-      closeMisses = 0;
-      const speculative = findComposerFromViewport() || findComposerFromDialogs();
-      if (speculative) {
-        rememberForcedMatch(speculative.composer, speculative.editor);
-        mountCoach(speculative);
-        return;
-      }
-      logDetectDebug("waiting");
-      return;
-    }
-
-    if (composerActive || isComposerRecentlySeen() || host || composerEl || forcedMatch) {
+    if (composerActive || host) {
       closeMisses += 1;
-      clearForcedMatch();
       if (closeMisses < CLOSE_MISS_LIMIT) {
         hideStatsHud();
-        if (SETTINGS.debug) {
-          console.debug("[AI Blocker] composer miss", closeMisses, "/", CLOSE_MISS_LIMIT);
-        }
         return;
       }
       if (SETTINGS.debug) {
-        console.info("[AI Blocker] composer closed — restoring session summary");
+        console.info("[AI Blocker] draft closed — restoring session summary");
       }
       endComposerSession();
       return;
@@ -1110,32 +712,17 @@ var AIBlocker = AIBlocker || {};
   }
 
   function requestComposerCloseCheck() {
-    composerPendingUntil = 0;
-    clearForcedMatch();
     closeMisses = Math.max(closeMisses, CLOSE_MISS_LIMIT - 1);
     const delays = [0, 80, 200, 450, 900];
     for (const delay of delays) {
       setTimeout(() => {
-        if (!isShareModalPresent()) {
+        if (!findDraftComposer()) {
           endComposerSession();
         } else {
           sync();
         }
       }, delay);
     }
-  }
-
-  function isEventOnShareModal(event) {
-    const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
-    return path.some(
-      (el) =>
-        el?.classList?.contains?.("share-box-v2__modal") ||
-        el?.classList?.contains?.("share-creation-state") ||
-        el?.classList?.contains?.("share-box") ||
-        el?.hasAttribute?.("data-test-modal") ||
-        el?.getAttribute?.("aria-labelledby") === "share-to-linkedin-modal__header" ||
-        el?.id === "share-to-linkedin-modal__header",
-    );
   }
 
   function isEventOnCoach(event) {
@@ -1145,6 +732,25 @@ var AIBlocker = AIBlocker || {};
     );
   }
 
+  function isEventOnShareModal(event) {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
+    return path.some((el) => {
+      if (!el || el.nodeType !== 1) {
+        return false;
+      }
+      if (el === composerEl) {
+        return true;
+      }
+      return Boolean(
+        el.classList?.contains?.("share-box-v2__modal") ||
+          el.classList?.contains?.("share-creation-state") ||
+          el.hasAttribute?.("data-test-modal") ||
+          el.getAttribute?.("aria-labelledby") === "share-to-linkedin-modal__header" ||
+          countToolbarHits(el).hits >= MIN_TOOLBAR_HITS,
+      );
+    });
+  }
+
   function isBackdropDismissTarget(event) {
     const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
     return path.some(
@@ -1152,48 +758,6 @@ var AIBlocker = AIBlocker || {};
         el?.classList?.contains?.("artdeco-modal-overlay") ||
         el?.classList?.contains?.("modal__overlay") ||
         (typeof el?.className === "string" && el.className.includes("modal-overlay")),
-    );
-  }
-
-  function burstSync() {
-    for (const timer of burstTimers) {
-      clearTimeout(timer);
-    }
-    burstTimers = BURST_MS.map((delay) => setTimeout(sync, delay));
-    sync();
-  }
-
-  function isComposerTrigger(element) {
-    if (!element?.closest) {
-      return false;
-    }
-    for (const selector of TRIGGER_SELECTORS) {
-      try {
-        if (element.closest(selector)) {
-          return true;
-        }
-      } catch (_error) {
-        // ignore invalid selector
-      }
-    }
-    const clickable = element.closest("button, [role='button'], a, .artdeco-button");
-    const label = String(
-      clickable?.getAttribute?.("aria-label") ||
-        clickable?.getAttribute?.("title") ||
-        clickable?.textContent ||
-        "",
-    )
-      .toLowerCase()
-      .replace(/\s+/g, " ")
-      .trim();
-    if (label.includes("start a post")) {
-      return true;
-    }
-    // Feed share shell: clicking the closed composer row opens the modal.
-    return Boolean(
-      element.closest(
-        ".share-box-feed-entry__top-bar, .share-box-feed-entry__closed-share-box, .share-box-feed-entry__trigger",
-      ),
     );
   }
 
@@ -1218,37 +782,23 @@ var AIBlocker = AIBlocker || {};
     document.addEventListener(
       "click",
       (event) => {
-        const pathMatch = matchFromComposedPath(event);
-        if (pathMatch && (placeholderLooksLikeShare(pathMatch.editor) || pathMatch.composer)) {
-          if (
-            pathMatch.composer?.classList?.contains("share-box-v2__modal") ||
-            pathMatch.composer?.getAttribute?.("role") === "dialog" ||
-            placeholderLooksLikeShare(pathMatch.editor)
-          ) {
-            rememberForcedMatch(pathMatch.composer, pathMatch.editor);
-            burstSync();
-          }
-        }
-        if (isComposerTrigger(event.target) || isComposerTrigger(pathMatch?.composer)) {
-          markComposerPending();
-          burstSync();
+        if (findDraftComposer()) {
+          sync();
           return;
         }
 
         const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
-        const dismiss = path.find(
-          (el) =>
-            el?.matches?.(
-              '[data-test-modal-close-btn], .artdeco-modal__dismiss, button[aria-label="Dismiss"]',
-            ),
+        const dismiss = path.find((el) =>
+          el?.matches?.(
+            '[data-test-modal-close-btn], .artdeco-modal__dismiss, button[aria-label="Dismiss"]',
+          ),
         );
-        if (dismiss && (isEventOnShareModal(event) || composerActive || forcedMatch || host)) {
+        if (dismiss && (composerActive || host)) {
           requestComposerCloseCheck();
           return;
         }
 
-        // Click outside the create-post modal (dimmed backdrop / feed) dismisses LinkedIn's overlay.
-        if (composerActive || forcedMatch || host) {
+        if (composerActive || host) {
           if (isEventOnCoach(event)) {
             return;
           }
@@ -1266,7 +816,7 @@ var AIBlocker = AIBlocker || {};
         if (event.key !== "Escape") {
           return;
         }
-        if (composerActive || forcedMatch || host) {
+        if (composerActive || host) {
           requestComposerCloseCheck();
         }
       },
@@ -1275,28 +825,9 @@ var AIBlocker = AIBlocker || {};
 
     document.addEventListener(
       "focusin",
-      (event) => {
-        const pathMatch = matchFromComposedPath(event);
-        if (pathMatch?.editor && !isCommentEditor(pathMatch.editor) && !isFeedPostEditor(pathMatch.editor)) {
-          if (placeholderLooksLikeShare(pathMatch.editor) || findShareRoot(pathMatch.editor) || pathMatch.composer) {
-            rememberForcedMatch(pathMatch.composer, pathMatch.editor);
-            burstSync();
-            return;
-          }
-        }
-        const target = event.target;
-        if (!target?.closest) {
-          return;
-        }
-        const editor = target.closest(
-          '.ql-editor[contenteditable="true"], [role="textbox"][contenteditable="true"]',
-        );
-        if (!editor || isCommentEditor(editor) || isFeedPostEditor(editor)) {
-          return;
-        }
-        if (findShareRoot(editor) || placeholderLooksLikeShare(editor)) {
-          rememberForcedMatch(findShareRoot(editor), editor);
-          burstSync();
+      () => {
+        if (findDraftComposer()) {
+          sync();
         }
       },
       true,

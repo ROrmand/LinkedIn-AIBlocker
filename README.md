@@ -10,7 +10,7 @@ A local Chrome extension that scores LinkedIn feed posts with weighted linguisti
 
 This is a joke extension, not an accurate AI detector. Heuristics are tunable and easy to add.
 
-On desktop, opening **Start a post** hides the session summary and shows a **Draft check** card to the right of the composer. It live-scores the draft with the same detectors and lists which parameters pass or fail while you type. Closing the composer restores the session summary.
+On desktop, opening **Create a post** hides the session summary and shows a **Draft overview** card to the right of the composer (same height as the post box). It live-scores the draft with the same detectors and lists which parameters pass or fail while you type. Closing the composer restores the session summary.
 
 `coverAllPosts` is currently `false` in [`src/config/settings.js`](src/config/settings.js), so posts are covered only when the score rule fires. Set it to `true` to cover every feed post again.
 
